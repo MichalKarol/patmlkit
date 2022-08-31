@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "patmlkit"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pain and tears ML kit - library created to support my journey via PHD"
 authors = ["Michal Karol <michal.p.karol@gmail.com>"]
 
@@ -9,7 +9,13 @@ python = "^3.10"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
+black = "^22.6.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[project.urls]
+source = "https://github.com/MichalKarol/patmlkit"
+tracker = "https://github.com/MichalKarol/patmlkit/issues"
+
