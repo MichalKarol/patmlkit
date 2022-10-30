@@ -1,15 +1,21 @@
-from cgi import print_arguments
-import math
-from typing import Callable, DefaultDict, Dict, List, Literal, Union, Tuple
-from unicodedata import category
-from patmlkit.json import read_json_file
-from patmlkit.image import read_rgb_image, write_rgb_image
-from collections import defaultdict
-from os import makedirs, path as pp
-from itertools import count, product
-import numpy as np
+from datetime import datetime
+from functools import reduce
 import cv2 as cv
+import math
+import numpy as np
 import numpy.typing as npt
+import operator
+import pyclipper
+
+
+from collections import defaultdict
+from itertools import count, product
+from itertools import permutations
+from os import makedirs, path as pp
+from patmlkit.image import read_rgb_image, write_rgb_image
+from patmlkit.json import read_json_file, write_json_file
+from tqdm import tqdm
+from typing import Callable, Dict, List, Literal, Set, Union, Tuple
 
 
 class COCOLicense:
@@ -189,19 +195,113 @@ class COCOImage:
 
 
 class COCOContext:
-    licenses: Dict[int, COCOLicense] = dict()
-    images: Dict[int, COCOImage] = dict()
-    annotations: Dict[int, COCOAnnotation] = dict()
-    categories: Dict[int, COCOCategory] = dict()
-    image_annotations: DefaultDict[int, List[COCOAnnotation]] = defaultdict(list)
+    base_path: str
+    licenses: Dict[int, COCOLicense]
+    images: Dict[int, COCOImage]
+    annotations: Dict[int, COCOAnnotation]
+    categories: Dict[int, COCOCategory]
+    image_annotations: Dict[int, List[COCOAnnotation]]
+
+
+class COCOStratifiedIterator:
+    def __init__(
+        self,
+        coco_context: COCOContext,
+        split: Tuple[float, float],
+        folds: List[List[int]],
+    ):
+        self.coco_context = coco_context
+        self.split = split
+        self.folds = folds
+        fold_part_size = 100 / len(folds)
+        train_size, test_size = self.split
+        train_folds_len = int(train_size / fold_part_size)
+        test_folds_len = int(test_size / fold_part_size)
+
+        base_set = [False] * (train_folds_len - 1) + [True]
+        self.permutations = iter(set(permutations(base_set)))
+        self.test_coco = self.__create_coco_out_of_folds__(
+            [image_id for fold in folds[:test_folds_len] for image_id in fold],
+        )
+
+    def to_json(self, json_file_path: str):
+        write_json_file(
+            json_file_path,
+            {
+                "split": self.split,
+                "folds": self.folds,
+            },
+        )
+
+    @staticmethod
+    def from_json(
+        coco_context: COCOContext, json_file_path: str
+    ) -> "COCOStratifiedIterator":
+        iterator_data = read_json_file(json_file_path)
+        assert iterator_data[
+            "split"
+        ], "COCO Stratified Iterator file does not have split"
+        assert iterator_data[
+            "folds"
+        ], "COCO Stratified Iterator file does not have folds"
+        return COCOStratifiedIterator(
+            coco_context, iterator_data["split"], iterator_data["folds"]
+        )
+
+    def __create_coco_out_of_folds__(self, folds: List[int]) -> "COCO":
+        new_coco_context = COCOContext()
+        new_coco_context.licenses = self.coco_context.licenses
+        new_coco_context.categories = self.coco_context.categories
+        new_coco_context.images = {
+            key: value
+            for key, value in self.coco_context.images.items()
+            if key in folds
+        }
+        new_coco_context.image_annotations = {
+            image.id: image.annotations for image in new_coco_context.images.values()
+        }
+
+        new_coco_context.annotations = {
+            annotation.id: annotation
+            for annotations in new_coco_context.image_annotations.values()
+            for annotation in annotations
+        }
+        new_coco_context.base_path = self.coco_context.base_path
+        return COCO(new_coco_context)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Tuple["COCO", "COCO", "COCO"]:
+        next_permutation = next(self.permutations)
+        train_coco = self.__create_coco_out_of_folds__(
+            [
+                image_id
+                for idx, is_fold_validation in enumerate(next_permutation)
+                if not is_fold_validation
+                for image_id in self.folds[idx]
+            ]
+        )
+        validation_coco = self.__create_coco_out_of_folds__(
+            [
+                image_id
+                for idx, is_fold_validation in enumerate(next_permutation)
+                if is_fold_validation
+                for image_id in self.folds[idx]
+            ]
+        )
+        return (train_coco, validation_coco, self.test_coco)
 
 
 class COCO:
     def __init__(self, coco_context: COCOContext):
         self.coco_context = coco_context
 
+    def to_json(self, json_file_path: str):
+        write_json_file(json_file_path, self.to_dict())
+
     @staticmethod
-    def from_json_file(json_file_path: str) -> "COCO":
+    def from_json(json_file_path: str) -> "COCO":
         coco_data = read_json_file(json_file_path)
         assert coco_data["images"], "COCO file does not have section images"
         assert coco_data["categories"], "COCO file does not have section categories"
@@ -238,6 +338,9 @@ class COCO:
             )
             for category in coco_data.get("categories", [])
         }
+
+        coco_context.annotations = {}
+        coco_context.image_annotations = {}
 
         for annotation in coco_data.get("annotations", []):
             if "point" in annotation:
@@ -276,82 +379,14 @@ class COCO:
                     annotation["category_id"],
                 )
             coco_context.annotations[new_annotation.id] = new_annotation
+            if coco_context.image_annotations.get(new_annotation.image_id) is None:
+                coco_context.image_annotations[new_annotation.image_id] = []
             coco_context.image_annotations[new_annotation.image_id].append(
                 new_annotation
             )
+
+        coco_context.base_path = pp.dirname(json_file_path)
         return COCO(coco_context)
-
-    @staticmethod
-    def from_test() -> "COCO":
-        coco_context = COCOContext()
-
-        coco_context.images = {
-             1: COCOImage(
-                coco_context,
-                1,
-                100,
-                100,
-                "xd",
-                0,
-            ),
-             2: COCOImage(
-                coco_context,
-                2,
-                100,
-                100,
-                "xd2",
-                0,
-            ),
-             3: COCOImage(
-                coco_context,
-                3,
-                100,
-                100,
-                "xd3",
-                0,
-            ),
-
-        }
-
-        coco_context.licenses = {
-            0: COCOLicense(
-                0,
-                "xdlic",
-                "XD",
-            )
-        }
-
-        coco_context.categories = {
-            0: COCOCategory(
-                0,
-                "a",
-               "False",
-            ),
-            1: COCOCategory(
-                1,
-                "a",
-               "False",
-            )
-        }
-
-        coco_context.annotations = {
-            0: COCOPointAnnotation(coco_context, 0, 1, 0, [0, 0]),
-            1: COCOPointAnnotation(coco_context, 1, 1, 1, [0, 0]),
-            2: COCOPointAnnotation(coco_context, 2, 1, 1, [0, 0]),
-            3: COCOPointAnnotation(coco_context, 3, 2, 0, [0, 0]),
-            4: COCOPointAnnotation(coco_context, 4, 3, 0, [0, 0]),
-            5: COCOPointAnnotation(coco_context, 5, 3, 1, [0, 0]),
-        }
-
-        coco_context.image_annotations[1].append(coco_context.annotations[0])
-        coco_context.image_annotations[1].append(coco_context.annotations[1])
-        coco_context.image_annotations[1].append(coco_context.annotations[2])
-        coco_context.image_annotations[2].append(coco_context.annotations[3])
-        coco_context.image_annotations[2].append(coco_context.annotations[4])
-        coco_context.image_annotations[3].append(coco_context.annotations[5])
-
-        return COCO(coco_context)
-
 
     @property
     def images(self):
@@ -371,17 +406,39 @@ class COCO:
 
     def to_dict(self):
         return {
-            "images": self.images,
-            "annotations": self.annotations,
-            "licenses": self.licenses,
-            "categories": self.categories,
+            "images": [image.to_dict() for image in self.images],
+            "annotations": [annotation.to_dict() for annotation in self.annotations],
+            "licenses": [license.to_dict() for license in self.licenses],
+            "categories": [category.to_dict() for category in self.categories],
+            "info": {
+                "year": datetime.today().year,
+                "version": "1",
+                "description": "Generated by patmlkit",
+                "contributor": "",
+                "url": "https://pypi.org/project/patmlkit/",
+                "date_created": datetime.today().isoformat(),
+            },
         }
 
-    def split_into_tiles(self, tile_size: int, overlap: float, tiled_dataset_directory: str, skip_empty: bool = True) -> "COCO":
+    def split_into_tiles(
+        self,
+        tile_size: int,
+        overlap: float,
+        tiled_dataset_directory: str,
+        skip_empty: bool = True,
+        skip_below_area: int = 20,
+    ) -> "COCO":
+        assert tile_size > 0, "Tile size must be positive"
+        assert overlap >= 0, "Overlap must be positive or zero"
+        assert overlap < 1, "Overlap must be less than one"
+
         makedirs(tiled_dataset_directory, exist_ok=True)
         new_coco_context = COCOContext()
         new_coco_context.licenses = self.coco_context.licenses
         new_coco_context.categories = self.coco_context.categories
+        new_coco_context.base_path = tiled_dataset_directory
+        new_coco_context.images = {}
+        new_coco_context.annotations = {}
 
         tile_window_size = int(tile_size * (1 - overlap))
 
@@ -390,35 +447,167 @@ class COCO:
         split_annotations_map = defaultdict(list)
 
         def adjust_points(points: List[Tuple[int, int]], row, column):
-            return {(
-                max(min(x, row * tile_window_size), row * tile_window_size + tile_size),
-                max(min(y, column * tile_window_size), column * tile_window_size + tile_size)
-            ) for x, y in points}
+            def isPointInside(point):
+                return (
+                    row * tile_window_size
+                    <= point[0]
+                    <= row * tile_window_size + tile_size
+                    and column * tile_window_size
+                    <= point[1]
+                    <= column * tile_window_size + tile_size
+                )
 
-        for annotation in self.coco_context.annotations.values():
+            if all([isPointInside(point) for point in points]):
+                return [
+                    (
+                        int(x - row * tile_window_size),
+                        int(y - column * tile_window_size),
+                    )
+                    for (x, y) in points
+                ]
+
+            def order_points(pts):
+                center = tuple(
+                    map(
+                        operator.truediv,
+                        reduce(lambda x, y: map(operator.add, x, y), pts),
+                        [len(pts)] * 2,
+                    )
+                )
+                return sorted(
+                    pts,
+                    key=lambda coord: (
+                        -135
+                        - math.degrees(
+                            math.atan2(*tuple(map(operator.sub, coord, center))[::-1])
+                        )
+                    )
+                    % 360,
+                )
+
+            sorted_points = order_points(np.array(list(set(points))))
+            clipPolygon = [
+                (row * tile_window_size, column * tile_window_size),
+                (row * tile_window_size + tile_size, column * tile_window_size),
+                (
+                    row * tile_window_size + tile_size,
+                    column * tile_window_size + tile_size,
+                ),
+                (row * tile_window_size, column * tile_window_size + tile_size),
+            ]
+            SCALING_FACTOR = 10000
+
+            pc = pyclipper.Pyclipper()
+            pc.AddPath(
+                pyclipper.scale_to_clipper(clipPolygon, SCALING_FACTOR),
+                pyclipper.PT_CLIP,
+                True,
+            )
+            pc.AddPath(
+                pyclipper.scale_to_clipper(sorted_points, SCALING_FACTOR),
+                pyclipper.PT_SUBJECT,
+                True,
+            )
+
+            solution = pyclipper.scale_from_clipper(
+                pc.Execute(pyclipper.CT_INTERSECTION), SCALING_FACTOR
+            )
+            print(solution, points, clipPolygon, row, column)
+
+            return [
+                (int(x - row * tile_window_size), int(y - column * tile_window_size))
+                for (x, y) in order_points(solution[0])
+            ]
+
+        def get_annotation_tiles(points: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
+            image_tiles = set()
+            for (x, y) in points:
+                start_row = max(0, math.ceil((x - tile_size) / tile_window_size))
+                end_row = math.ceil(x / tile_window_size)
+                start_column = max(0, math.ceil((y - tile_size) / tile_window_size))
+                end_column = math.ceil(y / tile_window_size)
+                print("A", points, start_row, end_row, start_column, end_column)
+                for (row, column) in product(
+                    range(start_row, end_row),
+                    range(start_column, end_column),
+                ):
+                    if (
+                        x == row * tile_window_size
+                        or y == column * tile_window_size
+                        or x == row * tile_window_size + tile_size
+                        or y == column * tile_window_size + tile_size
+                    ):
+                        continue
+                    print("B", (row, column))
+                    image_tiles.add((row, column))
+            return image_tiles
+
+        for annotation in tqdm(
+            list(self.coco_context.annotations.values())[:1000], unit="annotation"
+        ):
             if isinstance(annotation, COCOPointAnnotation):
-                x, y = annotation.point
-                row = math.ceil(x / tile_window_size)
-                column = math.ceil(y / tile_window_size)
+                for (row, column) in get_annotation_tiles([annotation.point]):
+                    split_annotations_map[
+                        f"{annotation.image_id}_{row}_{column}"
+                    ].append(
+                        COCOPointAnnotation(
+                            new_coco_context,
+                            next(annotation_id_generator),
+                            -1,
+                            annotation.category_id,
+                            list(adjust_points([annotation.point], row, column)[0]),
+                        )
+                    )
+            elif isinstance(annotation, COCOMaskAnnotation):
+                if len(annotation.segmentation) < 4:
+                    continue
 
-                split_annotations_map[f"{annotation.image_id}_{row}_{column}"].append(COCOPointAnnotation(
-                    new_coco_context,
-                    next(annotation_id_generator),
-                    -1,
-                    annotation.category_id,
-                    list(*adjust_points([(x, y)], row, column))
-                ))
+                point_list = [
+                    (annotation.segmentation[i * 2], annotation.segmentation[i * 2 + 1])
+                    for i in range(len(annotation.segmentation) // 2)
+                ]
+
+                for (row, column) in get_annotation_tiles(point_list):
+                    new_segmentation_points = adjust_points(point_list, row, column)
+                    new_segmentation_list = [
+                        coord
+                        for point in new_segmentation_points
+                        for coord in [point[0], point[1]]
+                    ]
+                    area = cv.contourArea(
+                        np.array([[pt] for pt in new_segmentation_points]).astype(
+                            np.float32
+                        )
+                    )
+                    new_x = min((point[0] for point in new_segmentation_points))
+                    new_y = min((point[1] for point in new_segmentation_points))
+                    new_x_max = max((point[0] for point in new_segmentation_points))
+                    new_y_max = max((point[1] for point in new_segmentation_points))
+                    new_w = new_x_max - new_x
+                    new_h = new_y_max - new_y
+
+                    if new_w == 0 or new_h == 0 or area < skip_below_area:
+                        continue
+
+                    split_annotations_map[
+                        f"{annotation.image_id}_{row}_{column}"
+                    ].append(
+                        COCOMaskAnnotation(
+                            new_coco_context,
+                            next(annotation_id_generator),
+                            -1,
+                            annotation.category_id,
+                            [new_x, new_y, new_w, new_h],
+                            "xywh",
+                            new_segmentation_list,
+                            area,
+                        )
+                    )
             elif isinstance(annotation, COCOBBoxAnnotation):
                 [x, y, w, h] = annotation.bbox
-                point_list = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
-                image_tiles = set()
+                point_list = [(x, y), (x, y + h), (x + w, y + h), (x + w, y)]
 
-                for point in point_list:
-                    row = math.ceil(point[0] / tile_window_size)
-                    column = math.ceil(point[1] / tile_window_size)
-                    image_tiles.add((row, column))
-
-                for row, column in image_tiles:
+                for (row, column) in get_annotation_tiles(point_list):
                     new_bbox_points = adjust_points(point_list, row, column)
                     new_x = min((point[0] for point in new_bbox_points))
                     new_y = min((point[1] for point in new_bbox_points))
@@ -427,151 +616,172 @@ class COCO:
                     new_w = new_x_max - new_x
                     new_h = new_y_max - new_y
 
-                    split_annotations_map[f"{annotation.image_id}_{row}_{column}"].append(COCOBBoxAnnotation(
-                        new_coco_context,
-                        next(annotation_id_generator),
-                        -1,
-                        annotation.category_id,
-                        [new_x, new_y, new_w, new_h],
-                        "xywh"
-                    ))
-            elif isinstance(annotation, COCOMaskAnnotation):
-                [x, y, w, h] = annotation.bbox
-                bbox_point_list = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
-                point_list = [
-                    (annotation.segmentation[i * 2], annotation.segmentation[i * 2 + 1])
-                    for i in range(len(annotation.segmentation) // 2)
-                ]
-                image_tiles = set()
-
-                for point in point_list:
-                    row = math.ceil(point[0] / tile_window_size)
-                    column = math.ceil(point[1] / tile_window_size)
-                    image_tiles.add((row, column))
-
-                for row, column in image_tiles:
-                    new_bbox_points = adjust_points(bbox_point_list, row, column)
-                    new_x = min((point[0] for point in new_bbox_points))
-                    new_y = min((point[1] for point in new_bbox_points))
-                    new_x_max = max((point[0] for point in new_bbox_points))
-                    new_y_max = max((point[1] for point in new_bbox_points))
-                    new_w = new_x_max - new_x
-                    new_h = new_y_max - new_y
-
-                    new_segmentation_points = adjust_points(point_list, row, column)
-                    new_segmantation_list = [coord for point in new_segmentation_points for coord in [point[0], point[1]] ]
-
-                    split_annotations_map[f"{annotation.image_id}_{row}_{column}"].append(COCOMaskAnnotation(
-                        new_coco_context,
-                        next(annotation_id_generator),
-                        -1,
-                        annotation.category_id,
-                        [new_x, new_y, new_w, new_h],
-                        "xywh",
-                        new_segmantation_list,
-                        cv.contourArea(new_segmentation_points)
-                    ))
-
-            for image in self.coco_context.images.values():
-                rows = range(0, math.ceil(image.height / tile_window_size))
-                columns = range(0, math.ceil(image.width / tile_window_size))
-                [base, extension] = pp.splitext(image.file_name)
-                raw_image = read_rgb_image(image.file_name)
-
-                for row, column in product(rows, columns):
-                    split_annotations = split_annotations_map[f"{annotation.image_id}_{row}_{column}"]
-                    if skip_empty and len(split_annotations) == 0:
+                    if new_w == 0 or new_h == 0 or new_w * new_h < skip_below_area:
                         continue
 
-                    full_tile = np.empty((tile_size, tile_size, 3))
-                    full_tile.fill(255)
+                    split_annotations_map[
+                        f"{annotation.image_id}_{row}_{column}"
+                    ].append(
+                        COCOBBoxAnnotation(
+                            new_coco_context,
+                            next(annotation_id_generator),
+                            -1,
+                            annotation.category_id,
+                            [new_x, new_y, new_w, new_h],
+                            "xywh",
+                        )
+                    )
 
-                    tile = raw_image[
-                        row * tile_window_size : row * tile_window_size + tile_size,
-                        column * tile_window_size : column * tile_window_size + tile_size,
-                    ]
-                    full_tile[: tile.shape[0], : tile.shape[1]] = tile
+        for image in tqdm(self.coco_context.images.values(), unit="image"):
+            rows = range(0, math.ceil(image.height / tile_window_size))
+            columns = range(0, math.ceil(image.width / tile_window_size))
+            [base, extension] = pp.splitext(image.file_name)
+            read_path = pp.join(self.coco_context.base_path, image.file_name)
+            raw_image = read_rgb_image(read_path)
 
-                    tile_file_name = pp.join(tiled_dataset_directory, f"{base}_{row}_{column}.{extension}")
-                    write_rgb_image(tile_file_name, full_tile)
-                    new_image_id = next(image_id_generator)
-                    new_coco_context.images[new_image_id] = COCOImage(new_coco_context, new_image_id, tile_size, tile_size, tile_file_name, image.license_id)
-                    for split_annotation in split_annotations:
-                        split_annotation.image_id = new_image_id
-                        new_coco_context.annotations[split_annotation.id] = split_annotation
+            for row, column in product(rows, columns):
+                split_annotations = split_annotations_map[f"{image.id}_{row}_{column}"]
+                if skip_empty and len(split_annotations) == 0:
+                    continue
 
-        return COCO(new_coco_context)
+                full_tile = np.empty((tile_size, tile_size, 3), np.uint8)
+                full_tile.fill(255)
+
+                tile = raw_image[
+                    column * tile_window_size : column * tile_window_size + tile_size,
+                    row * tile_window_size : row * tile_window_size + tile_size,
+                ]
+                full_tile[: tile.shape[0], : tile.shape[1]] = tile
+
+                tile_file_name = f"{base}_{row}_{column}{extension}"
+                tile_full_path = pp.join(tiled_dataset_directory, tile_file_name)
+                write_rgb_image(tile_full_path, full_tile)
+                new_image_id = next(image_id_generator)
+                new_coco_context.images[new_image_id] = COCOImage(
+                    new_coco_context,
+                    new_image_id,
+                    tile_size,
+                    tile_size,
+                    tile_file_name,
+                    image.license_id,
+                )
+                for split_annotation in split_annotations:
+                    split_annotation.image_id = new_image_id
+                    new_coco_context.annotations[split_annotation.id] = split_annotation
+        new_coco = COCO(new_coco_context)
+        new_coco.to_json(pp.join(tiled_dataset_directory, "dataset.json"))
+        return new_coco
 
     @staticmethod
-    def default_fitness_function(chromosome: npt.NDArray[np.int32], images: List[COCOImage], target_values: Dict[int, int], folds: int):
+    def default_fitness_function(
+        chromosome: npt.NDArray[np.int32],
+        images: List[COCOImage],
+        target_values: Dict[int, int],
+        folds: int,
+    ):
         fold_categories = defaultdict(lambda: defaultdict(int))
         for image_idx, gene in enumerate(chromosome):
             for ann in images[image_idx].annotations:
                 fold_categories[gene][ann.category_id] += 1
 
-        # print([
-        #     np.abs([
-        #         category_target_value - fold_categories[i][category_id] for category_id, category_target_value in target_values.items()
-        #     ]
-        #         ) for i in range(folds)
-        #     ])
-
-        return -1 *  np.mean([
-            np.sum(np.abs([
-                category_target_value - fold_categories[i][category_id] for category_id, category_target_value in target_values.items()
+        return -1 * np.mean(
+            [
+                np.sum(
+                    np.abs(
+                        [
+                            category_target_value - fold_categories[i][category_id]
+                            for category_id, category_target_value in target_values.items()
+                        ]
+                    )
+                )
+                for i in range(folds)
             ]
-                )) for i in range(folds)
-            ])
+        ).astype(float)
 
-    def get_stratified_k_fold(self, splits: List[float] = [80, 20], folds: int = 5, population: int = 100, max_iterations: int = 100, fitness_function: Callable[[npt.NDArray[np.int32], List[COCOImage], Dict[int, int], int], float] = default_fitness_function, top_population_left_percent: int = 10, tournament_size_percent: int = 5, mutation_prob: float = 0.05):
-        assert sum(splits) == 100, "Splits must sum into 100%"
-        assert all([split % (100 / folds) == 0 for split in splits]), "Splits must be dividable by 100/folds"
+    def get_stratified_k_fold(
+        self,
+        split: Tuple[float, float] = (80, 20),
+        folds: int = 5,
+        population: int = 100,
+        max_iterations: int = 100,
+        fitness_function: Callable[
+            [npt.NDArray[np.int32], List[COCOImage], Dict[int, int], int], float
+        ] = default_fitness_function,
+        top_population_left_percent: int = 10,
+        tournament_size_percent: int = 5,
+        mutation_prob: float = 0.05,
+    ):
+        assert sum(split) == 100, "Split must sum into 100%"
+        assert len(split) == 2, "Len of split must equal 2"
+        assert all(
+            [split % (100 / folds) == 0 for split in split]
+        ), "Split must be dividable by 100/folds"
+        fold_part_size = 100 / folds
+        train_size, _ = split
+        train_folds_len = train_size // fold_part_size
+        assert train_folds_len > 1, "Train split cannot consists out of single fold"
 
         rng = np.random.default_rng()
 
-        # number_of_splits = len(splits)
         length_of_chromosome = len(self.images)
         ann_categories = np.array([ann.category_id for ann in self.annotations])
-        target_categories_count = { category.id: np.sum(ann_categories == category.id) // folds for category in self.categories }
+        target_categories_count = {
+            category.id: np.sum(ann_categories == category.id) // folds
+            for category in self.categories
+        }
 
         number_of_parents = 2
 
-        population_array = (rng.random((population, length_of_chromosome)) * folds).astype(np.int32)
-        fintness_function_simple = lambda chromosome: fitness_function(chromosome, self.images, target_categories_count, folds)
+        population_array = (
+            rng.random((population, length_of_chromosome)) * folds
+        ).astype(np.int32)
+        fitness_function_simple = lambda chromosome: fitness_function(
+            chromosome, self.images, target_categories_count, folds
+        )
         top_population_left = population * top_population_left_percent // 100
         tournament_size = population * tournament_size_percent // 100
 
         for iteration in range(max_iterations):
             new_population_array = population_array.copy()
-            # print(new_population_array, new_population_array.shape)
 
-            fitness_scores = np.apply_along_axis(fintness_function_simple, 1, new_population_array)
-            # print(fitness_scores, fitness_scores.shape)
+            fitness_scores = np.apply_along_axis(
+                fitness_function_simple, 1, new_population_array
+            )
 
             sorted_indexes = np.argsort(fitness_scores)[::-1]
-            tournaments = rng.choice(population, (population - top_population_left, tournament_size))
-            transfer_from_second_parent = rng.random((population - top_population_left, length_of_chromosome)) > 0.5
+            tournaments = rng.choice(
+                population, (population - top_population_left, tournament_size)
+            )
+            transfer_from_second_parent = (
+                rng.random((population - top_population_left, length_of_chromosome))
+                > 0.5
+            )
 
-            mutations_mask = rng.random((population, length_of_chromosome)) < mutation_prob
+            mutations_mask = (
+                rng.random((population, length_of_chromosome)) < mutation_prob
+            )
             mutations = rng.random((population, length_of_chromosome)) * folds
 
             top_population_items_indexes = sorted_indexes[:top_population_left]
-            population_array[:top_population_left] = new_population_array[top_population_items_indexes]
+            population_array[:top_population_left] = new_population_array[
+                top_population_items_indexes
+            ]
 
-            top_tournaments_parents_indexes = np.sort(tournaments, axis=1)[:, :number_of_parents]
+            top_tournaments_parents_indexes = np.sort(tournaments, axis=1)[
+                :, :number_of_parents
+            ]
 
-            population_array[top_population_left:] = new_population_array[sorted_indexes[top_tournaments_parents_indexes[:, 0]]]
-            # print("pre", "".join([str(i) for i in population_array[top_population_left + idx]]))
+            population_array[top_population_left:] = new_population_array[
+                sorted_indexes[top_tournaments_parents_indexes[:, 0]]
+            ]
 
-            population_array[top_population_left:][transfer_from_second_parent] = new_population_array[sorted_indexes[top_tournaments_parents_indexes[:, 1]]][transfer_from_second_parent]
-            # print("post", "".join([str(i) for i in population_array[top_population_left + idx]]))
-
-
-            # for idx in range(population - top_population_left):
-            #     print("pre", "".join([str(i) for i in population_array[top_population_left + idx]]))
-            #     print("changed", "".join([str(i) for i in population_array[top_population_left + idx][split_points[idx]:]]))
-            #     population_array[top_population_left + idx, split_points[idx]:] = new_population_array[sorted_indexes[top_tournaments_parents_indexes[:, 1]]][idx, split_points[idx]:]
-            #
+            population_array[top_population_left:][
+                transfer_from_second_parent
+            ] = new_population_array[
+                sorted_indexes[top_tournaments_parents_indexes[:, 1]]
+            ][
+                transfer_from_second_parent
+            ]
 
             population_array[mutations_mask] = mutations[mutations_mask]
 
@@ -581,35 +791,19 @@ class COCO:
                 for ann in self.images[image_idx].annotations:
                     fold_categories[gene][ann.category_id] += 1
 
-            # print)
-
-            print(iteration, np.max(fitness_scores),
-            [
-                np.abs([
-                    category_target_value - fold_categories[i][category_id] for category_id, category_target_value in target_categories_count.items()
-                ]
-                    ) for i in range(folds)
-                ],
-
-            [
-                    category_target_value for category_id, category_target_value in target_categories_count.items()
-
-                ],
-
-                [
-                 [
-                    fold_categories[i][category_id] for category_id, category_target_value in target_categories_count.items()
-                ]
-                     for i in range(folds)
-                ]
-
-                )
-
         return None
 
 
 def main():
-    COCO.from_json_file("/home/mkarol/data/dvc_datasets/ki_67/SHIDC_annotated_transformed/train/train.json").get_stratified_k_fold(splits=[100*2/3, 100/3], folds=3, population=100)
+    full_dataset = COCO.from_json(
+        "/home/mkarol/PHD/dvc_datasets/ki_67/fulawka/custom_annotations_fixed.json"
+    )
+    splitted_dataset = full_dataset.split_into_tiles(
+        1024, 0.9, "/home/mkarol/PHD/dvc_datasets/ki_67/tiled_fulawka_1024_0.5/"
+    )
+
+    # .get_stratified_k_fold(split=(100 * 2 / 3, 100 / 3), folds=3, population=100)
+
 
 if __name__ == "__main__":
     main()
