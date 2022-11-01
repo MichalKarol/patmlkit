@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "patmlkit"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pain and tears ML kit - library created to support my journey via PHD"
 authors = ["Michal Karol <michal.p.karol@gmail.com>"]
 

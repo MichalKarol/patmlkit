@@ -1,5 +1,6 @@
 from datetime import datetime
 from functools import reduce
+from traceback import print_tb
 import cv2 as cv
 import math
 import numpy as np
@@ -14,7 +15,7 @@ from itertools import permutations
 from os import makedirs, path as pp
 from patmlkit.image import read_rgb_image, write_rgb_image
 from patmlkit.json import read_json_file, write_json_file
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from typing import Callable, Dict, List, Literal, Set, Union, Tuple
 
 
@@ -439,6 +440,7 @@ class COCO:
         new_coco_context.base_path = tiled_dataset_directory
         new_coco_context.images = {}
         new_coco_context.annotations = {}
+        new_coco_context.image_annotations = {}
 
         tile_window_size = int(tile_size * (1 - overlap))
 
@@ -512,7 +514,6 @@ class COCO:
             solution = pyclipper.scale_from_clipper(
                 pc.Execute(pyclipper.CT_INTERSECTION), SCALING_FACTOR
             )
-            print(solution, points, clipPolygon, row, column)
 
             return [
                 (int(x - row * tile_window_size), int(y - column * tile_window_size))
@@ -526,7 +527,6 @@ class COCO:
                 end_row = math.ceil(x / tile_window_size)
                 start_column = max(0, math.ceil((y - tile_size) / tile_window_size))
                 end_column = math.ceil(y / tile_window_size)
-                print("A", points, start_row, end_row, start_column, end_column)
                 for (row, column) in product(
                     range(start_row, end_row),
                     range(start_column, end_column),
@@ -538,12 +538,11 @@ class COCO:
                         or y == column * tile_window_size + tile_size
                     ):
                         continue
-                    print("B", (row, column))
                     image_tiles.add((row, column))
             return image_tiles
 
         for annotation in tqdm(
-            list(self.coco_context.annotations.values())[:1000], unit="annotation"
+            self.coco_context.annotations.values(), unit="annotation"
         ):
             if isinstance(annotation, COCOPointAnnotation):
                 for (row, column) in get_annotation_tiles([annotation.point]):
@@ -665,9 +664,14 @@ class COCO:
                     tile_file_name,
                     image.license_id,
                 )
+                new_coco_context.image_annotations[new_image_id] = []
                 for split_annotation in split_annotations:
                     split_annotation.image_id = new_image_id
                     new_coco_context.annotations[split_annotation.id] = split_annotation
+                    new_coco_context.image_annotations[new_image_id].append(
+                        split_annotation
+                    )
+
         new_coco = COCO(new_coco_context)
         new_coco.to_json(pp.join(tiled_dataset_directory, "dataset.json"))
         return new_coco
@@ -707,9 +711,9 @@ class COCO:
         fitness_function: Callable[
             [npt.NDArray[np.int32], List[COCOImage], Dict[int, int], int], float
         ] = default_fitness_function,
-        top_population_left_percent: int = 10,
-        tournament_size_percent: int = 5,
-        mutation_prob: float = 0.05,
+        top_population_left_percent: int = 5,
+        tournament_size_percent: int = 10,
+        mutation_prob: float = 0.01,
     ):
         assert sum(split) == 100, "Split must sum into 100%"
         assert len(split) == 2, "Len of split must equal 2"
@@ -740,70 +744,103 @@ class COCO:
         )
         top_population_left = population * top_population_left_percent // 100
         tournament_size = population * tournament_size_percent // 100
+        best_chromosome = []
 
-        for iteration in range(max_iterations):
-            new_population_array = population_array.copy()
+        with trange(max_iterations) as pbar:
+            for _ in pbar:
+                new_population_array = population_array.copy()
 
-            fitness_scores = np.apply_along_axis(
-                fitness_function_simple, 1, new_population_array
-            )
+                fitness_scores = np.apply_along_axis(
+                    fitness_function_simple, 1, new_population_array
+                )
 
-            sorted_indexes = np.argsort(fitness_scores)[::-1]
-            tournaments = rng.choice(
-                population, (population - top_population_left, tournament_size)
-            )
-            transfer_from_second_parent = (
-                rng.random((population - top_population_left, length_of_chromosome))
-                > 0.5
-            )
+                sorted_indexes = np.argsort(fitness_scores)[::-1]
+                tournaments = rng.choice(
+                    population,
+                    (
+                        math.ceil((population - top_population_left) / 2),
+                        tournament_size,
+                    ),
+                )
+                crossing_points = (
+                    rng.random(math.ceil((population - top_population_left) / 2))
+                    * length_of_chromosome
+                )
 
-            mutations_mask = (
-                rng.random((population, length_of_chromosome)) < mutation_prob
-            )
-            mutations = rng.random((population, length_of_chromosome)) * folds
+                mutations_mask = (
+                    rng.random((population - top_population_left, length_of_chromosome))
+                    < mutation_prob
+                )
+                mutations = (
+                    rng.random((population - top_population_left, length_of_chromosome))
+                    * folds
+                )
 
-            top_population_items_indexes = sorted_indexes[:top_population_left]
-            population_array[:top_population_left] = new_population_array[
-                top_population_items_indexes
+                top_population_items_indexes = sorted_indexes[:top_population_left]
+                population_array[:top_population_left] = new_population_array[
+                    top_population_items_indexes
+                ]
+
+                top_tournaments_parents_indexes = np.sort(tournaments, axis=1)[
+                    :, :number_of_parents
+                ]
+
+                max_crossed_population = population - top_population_left
+
+                population_array[top_population_left::2] = new_population_array[
+                    sorted_indexes[top_tournaments_parents_indexes[:, 0]]
+                ][: math.ceil(max_crossed_population / 2)]
+                population_array[top_population_left + 1 :: 2] = new_population_array[
+                    sorted_indexes[top_tournaments_parents_indexes[:, 1]]
+                ][: math.floor(max_crossed_population / 2)]
+
+                cross_indicies = np.array(
+                    [
+                        np.arange(length_of_chromosome) < crossing_point
+                        for crossing_point in crossing_points
+                    ]
+                )
+
+                population_array[top_population_left::2][
+                    cross_indicies[: math.ceil(max_crossed_population / 2)]
+                ] = new_population_array[
+                    sorted_indexes[top_tournaments_parents_indexes[:, 1]]
+                ][
+                    : math.ceil(max_crossed_population / 2)
+                ][
+                    cross_indicies[: math.ceil(max_crossed_population / 2)]
+                ]
+
+                population_array[top_population_left + 1 :: 2][
+                    np.logical_not(cross_indicies)[
+                        : math.floor(max_crossed_population / 2)
+                    ]
+                ] = new_population_array[
+                    sorted_indexes[top_tournaments_parents_indexes[:, 0]]
+                ][
+                    : math.floor(max_crossed_population / 2)
+                ][
+                    np.logical_not(cross_indicies)[
+                        : math.floor(max_crossed_population / 2)
+                    ]
+                ]
+
+                population_array[top_population_left:][mutations_mask] = mutations[
+                    mutations_mask
+                ]
+                best_chromosome = new_population_array[np.argmax(fitness_scores)]
+                pbar.set_postfix(best_score=fitness_function_simple(best_chromosome))
+
+        iterator_folds = [
+            [
+                self.images[image_idx].id
+                for image_idx, gene in enumerate(best_chromosome)
+                if gene == fold
             ]
-
-            top_tournaments_parents_indexes = np.sort(tournaments, axis=1)[
-                :, :number_of_parents
-            ]
-
-            population_array[top_population_left:] = new_population_array[
-                sorted_indexes[top_tournaments_parents_indexes[:, 0]]
-            ]
-
-            population_array[top_population_left:][
-                transfer_from_second_parent
-            ] = new_population_array[
-                sorted_indexes[top_tournaments_parents_indexes[:, 1]]
-            ][
-                transfer_from_second_parent
-            ]
-
-            population_array[mutations_mask] = mutations[mutations_mask]
-
-            best_chromosome = new_population_array[np.argmax(fitness_scores)]
-            fold_categories = defaultdict(lambda: defaultdict(int))
-            for image_idx, gene in enumerate(best_chromosome):
-                for ann in self.images[image_idx].annotations:
-                    fold_categories[gene][ann.category_id] += 1
-
-        return None
-
-
-def main():
-    full_dataset = COCO.from_json(
-        "/home/mkarol/PHD/dvc_datasets/ki_67/fulawka/custom_annotations_fixed.json"
-    )
-    splitted_dataset = full_dataset.split_into_tiles(
-        1024, 0.9, "/home/mkarol/PHD/dvc_datasets/ki_67/tiled_fulawka_1024_0.5/"
-    )
-
-    # .get_stratified_k_fold(split=(100 * 2 / 3, 100 / 3), folds=3, population=100)
-
-
-if __name__ == "__main__":
-    main()
+            for fold in range(folds)
+        ]
+        coco_iterator = COCOStratifiedIterator(self.coco_context, split, iterator_folds)
+        coco_iterator.to_json(
+            pp.join(self.coco_context.base_path, "dataset_split.json")
+        )
+        return coco_iterator
