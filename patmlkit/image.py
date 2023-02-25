@@ -1,6 +1,6 @@
-from typing import Tuple
 import cv2 as cv
 import imagesize
+from typing import NamedTuple
 
 
 def read_bgr_image(path: str):
@@ -11,12 +11,18 @@ def read_rgb_image(path: str):
     return cv.cvtColor(cv.imread(path), cv.COLOR_BGR2RGB)
 
 
-def read_image_shape(path: str) -> Tuple[int, int]:
-    return imagesize.get(path)  # type: ignore
+class ImageShape(NamedTuple):
+    width: int
+    height: int
+
+
+def read_image_shape(path: str):
+    width, height = imagesize.get(path)
+    return ImageShape(int(width), int(height))
+
 
 def read_image_from_tensor(tensor):
     return tensor.numpy().transpose(1, 2, 0) * 255
-
 
 
 def write_bgr_image(path: str, image: cv.Mat):

@@ -1,6 +1,5 @@
 from datetime import datetime
 from functools import reduce
-from traceback import print_tb
 import cv2 as cv
 import math
 import numpy as np
@@ -16,43 +15,107 @@ from os import makedirs, path as pp
 from patmlkit.image import read_rgb_image, write_rgb_image
 from patmlkit.json import read_json_file, write_json_file
 from tqdm import tqdm, trange
-from typing import Callable, Dict, List, Literal, Set, Union, Tuple
+from typing import Any, Callable, Dict, List, Literal, Set, Union, Tuple
 
 
 class COCOLicense:
-    def __init__(self, id: int, name: str, url: str):
+    def __init__(
+        self,
+        id: int,
+        name: str,
+        url: str,
+        custom_attributes: Dict[str, Any] | None = None,
+    ):
         self.id = id
         self.name = name
         self.url = url
+        self._custom_attributes = custom_attributes or dict()
+
+    @property
+    def custom_attributes(self) -> Dict[str, Any]:
+        return self._custom_attributes
+
+    @custom_attributes.setter
+    def custom_attributes(self, custom_attributes: Dict[str, Any]):
+        self._custom_attributes = custom_attributes
 
     def to_dict(self):
         return {
+            **self._custom_attributes,
             "id": self.id,
             "name": self.name,
             "url": self.url,
         }
 
+    @staticmethod
+    def from_dict(json_data: Dict[str, Any]):
+        required_keys = ["id", "name", "url"]
+        return COCOLicense(
+            *[json_data[key] for key in required_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys
+            },
+        )
+
 
 class COCOCategory:
-    def __init__(self, id: int, name: str, supercategory: str):
+    def __init__(
+        self,
+        id: int,
+        name: str,
+        supercategory: str,
+        custom_attributes: Dict[str, Any] | None = None,
+    ):
         self.id = id
         self.name = name
         self.supercategory = supercategory
+        self._custom_attributes = custom_attributes or dict()
+
+    @property
+    def custom_attributes(self) -> Dict[str, Any]:
+        return self._custom_attributes
+
+    @custom_attributes.setter
+    def custom_attributes(self, custom_attributes: Dict[str, Any]):
+        self._custom_attributes = custom_attributes
 
     def to_dict(self):
         return {
+            **self._custom_attributes,
             "id": self.id,
             "name": self.name,
             "supercategory": self.supercategory,
         }
 
+    @staticmethod
+    def from_dict(json_data: Dict[str, Any]):
+        required_keys = ["id", "name", "supercategory"]
+        return COCOCategory(
+            *[json_data[key] for key in required_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys
+            },
+        )
+
 
 class COCOAnnotation:
-    def __init__(self, ctx: "COCOContext", id: int, image_id: int, category_id: int):
+    def __init__(
+        self,
+        ctx: "COCOContext",
+        id: int,
+        image_id: int,
+        category_id: int,
+        custom_attributes: Dict[str, Any] | None = None,
+    ):
         self.ctx = ctx
         self.id = id
         self.image_id = image_id
         self.category_id = category_id
+        self._custom_attributes = custom_attributes or dict()
 
     @property
     def image(self):
@@ -62,13 +125,35 @@ class COCOAnnotation:
     def category(self):
         return self.ctx.categories[self.category_id]
 
+    @property
+    def custom_attributes(self) -> Dict[str, Any]:
+        return self._custom_attributes
+
+    @custom_attributes.setter
+    def custom_attributes(self, custom_attributes: Dict[str, Any]):
+        self._custom_attributes = custom_attributes
+
     def to_dict(self):
         return {
+            **self._custom_attributes,
             "id": self.id,
             "image_id": self.image_id,
             "category_id": self.category_id,
             "iscrowd": 0,
         }
+
+    @staticmethod
+    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+        required_keys = ["id", "image_id", "category_id"]
+        return COCOAnnotation(
+            ctx,
+            *[json_data[key] for key in required_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys
+            },
+        )
 
 
 class COCOPointAnnotation(COCOAnnotation):
@@ -79,12 +164,26 @@ class COCOPointAnnotation(COCOAnnotation):
         image_id: int,
         category_id: int,
         point: List[int],
+        custom_attributes: Dict[str, Any] | None = None,
     ):
-        COCOAnnotation.__init__(self, ctx, id, image_id, category_id)
+        COCOAnnotation.__init__(self, ctx, id, image_id, category_id, custom_attributes)
         self.point = point
 
     def to_dict(self):
         return {**super().to_dict(), "point": self.point}
+
+    @staticmethod
+    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+        required_keys = ["id", "image_id", "category_id", "point"]
+        return COCOPointAnnotation(
+            ctx,
+            *[json_data[key] for key in required_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys
+            },
+        )
 
 
 BBOxType = Union[Literal["xywh"], Literal["xyxy"], Literal["ccwh"]]
@@ -98,9 +197,10 @@ class COCOBBoxAnnotation(COCOAnnotation):
         image_id: int,
         category_id: int,
         bbox: List[int],
-        bbox_type: BBOxType,
+        bbox_type: BBOxType = "xywh",
+        custom_attributes: Dict[str, Any] | None = None,
     ):
-        COCOAnnotation.__init__(self, ctx, id, image_id, category_id)
+        COCOAnnotation.__init__(self, ctx, id, image_id, category_id, custom_attributes)
         assert len(bbox) == 4, "Bounding box does not have 4 elements"
         self.bbox = bbox
         if bbox_type == "xyxy":
@@ -124,6 +224,21 @@ class COCOBBoxAnnotation(COCOAnnotation):
             "type": "xywh",
         }
 
+    @staticmethod
+    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+        required_keys = ["id", "image_id", "category_id", "bbox"]
+        optional_keys = ["type"]
+        return COCOBBoxAnnotation(
+            ctx,
+            *[json_data[key] for key in required_keys],
+            *[json_data.get(key) for key in optional_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys and key not in optional_keys
+            },
+        )
+
 
 class COCOMaskAnnotation(COCOBBoxAnnotation):
     def __init__(
@@ -133,12 +248,13 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
         image_id: int,
         category_id: int,
         bbox: List[int],
-        bbox_type: BBOxType,
         segmentation: List[int],
         area: int,
+        bbox_type: BBOxType = "xywh",
+        custom_attributes: Dict[str, Any] | None = None,
     ):
         COCOBBoxAnnotation.__init__(
-            self, ctx, id, image_id, category_id, bbox, bbox_type
+            self, ctx, id, image_id, category_id, bbox, bbox_type, custom_attributes
         )
         assert len(segmentation) % 2 == 0, "Segmentation has odd number of elements"
         assert area > 0, "Area is below zero"
@@ -152,6 +268,28 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
             "area": self.area,
         }
 
+    @staticmethod
+    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+        required_keys = [
+            "id",
+            "image_id",
+            "category_id",
+            "bbox",
+            "segmentation",
+            "area",
+        ]
+        optional_keys = ["type"]
+        return COCOMaskAnnotation(
+            ctx,
+            *[json_data[key] for key in required_keys],
+            *[json_data.get(key) for key in optional_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys and key not in optional_keys
+            },
+        )
+
 
 class COCOImage:
     def __init__(
@@ -162,6 +300,7 @@ class COCOImage:
         height: int,
         file_name: str,
         license_id: int | None = None,
+        custom_attributes: Dict[str, Any] | None = None,
     ):
         self.ctx = ctx
         self.id = id
@@ -171,10 +310,14 @@ class COCOImage:
         self.license_id = license_id
         self.flickr_url = file_name
         self.coco_url = file_name
+        self._custom_attributes = custom_attributes or dict()
 
     @property
     def annotations(self):
-        return self.ctx.image_annotations.get(self.id, list())
+        return [
+            self.ctx.annotations[ann_id]
+            for ann_id in self.ctx.image_annotations.get(self.id, list())
+        ]
 
     @property
     def license(self):
@@ -182,8 +325,17 @@ class COCOImage:
             return None
         return self.ctx.licenses.get(self.license_id, None)
 
+    @property
+    def custom_attributes(self) -> Dict[str, Any]:
+        return self._custom_attributes
+
+    @custom_attributes.setter
+    def custom_attributes(self, custom_attributes: Dict[str, Any]):
+        self._custom_attributes = custom_attributes
+
     def to_dict(self):
         return {
+            **self._custom_attributes,
             "id": self.id,
             "width": self.width,
             "height": self.height,
@@ -194,6 +346,21 @@ class COCOImage:
             "date_captured": "",
         }
 
+    @staticmethod
+    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+        required_keys = ["id", "width", "height", "file_name"]
+        optional_keys = ["license"]
+        return COCOImage(
+            ctx,
+            *[json_data[key] for key in required_keys],
+            *[json_data.get(key) for key in optional_keys],
+            custom_attributes={
+                key: value
+                for key, value in json_data.items()
+                if key not in required_keys and key not in optional_keys
+            },
+        )
+
 
 class COCOContext:
     base_path: str
@@ -201,7 +368,7 @@ class COCOContext:
     images: Dict[int, COCOImage]
     annotations: Dict[int, COCOAnnotation]
     categories: Dict[int, COCOCategory]
-    image_annotations: Dict[int, List[COCOAnnotation]]
+    image_annotations: Dict[int, List[int]]
 
 
 class COCOStratifiedIterator:
@@ -259,13 +426,14 @@ class COCOStratifiedIterator:
             if key in folds
         }
         new_coco_context.image_annotations = {
-            image.id: image.annotations for image in new_coco_context.images.values()
+            image.id: [ann.id for ann in image.annotations]
+            for image in new_coco_context.images.values()
         }
 
         new_coco_context.annotations = {
-            annotation.id: annotation
-            for annotations in new_coco_context.image_annotations.values()
-            for annotation in annotations
+            annotation_id: self.coco_context.annotations[annotation_id]
+            for annotation_ids in new_coco_context.image_annotations.values()
+            for annotation_id in annotation_ids
         }
         new_coco_context.base_path = self.coco_context.base_path
         return COCO(new_coco_context)
@@ -297,97 +465,16 @@ class COCOStratifiedIterator:
 class COCO:
     def __init__(self, coco_context: COCOContext):
         self.coco_context = coco_context
+        self._custom_attributes = dict()
+        self._custom_info = dict()
 
     def to_json(self, json_file_path: str):
         write_json_file(json_file_path, self.to_dict())
 
     @staticmethod
-    def from_json(json_file_path: str) -> "COCO":
+    def from_json(json_file_path: str):
         coco_data = read_json_file(json_file_path)
-        assert coco_data["images"], "COCO file does not have section images"
-        assert coco_data["categories"], "COCO file does not have section categories"
-        assert coco_data["annotations"], "COCO file does not have section annotations"
-
-        coco_context = COCOContext()
-
-        coco_context.images = {
-            image["id"]: COCOImage(
-                coco_context,
-                image["id"],
-                image["width"],
-                image["height"],
-                image["file_name"],
-                image["license"],
-            )
-            for image in coco_data.get("images", [])
-        }
-
-        coco_context.licenses = {
-            license["id"]: COCOLicense(
-                license["id"],
-                license["name"],
-                license["url"],
-            )
-            for license in coco_data.get("licenses", [])
-        }
-
-        coco_context.categories = {
-            category["id"]: COCOCategory(
-                category["id"],
-                category["name"],
-                category["supercategory"],
-            )
-            for category in coco_data.get("categories", [])
-        }
-
-        coco_context.annotations = {}
-        coco_context.image_annotations = {}
-
-        for annotation in coco_data.get("annotations", []):
-            if "point" in annotation:
-                new_annotation = COCOPointAnnotation(
-                    coco_context,
-                    annotation["id"],
-                    annotation["image_id"],
-                    annotation["category_id"],
-                    annotation["point"],
-                )
-            elif "segmentation" in annotation:
-                new_annotation = COCOMaskAnnotation(
-                    coco_context,
-                    annotation["id"],
-                    annotation["image_id"],
-                    annotation["category_id"],
-                    annotation["bbox"],
-                    annotation.get("type", "xywh"),
-                    annotation["segmentation"],
-                    annotation["area"],
-                )
-            elif "bbox" in annotation:
-                new_annotation = COCOBBoxAnnotation(
-                    coco_context,
-                    annotation["id"],
-                    annotation["image_id"],
-                    annotation["category_id"],
-                    annotation["bbox"],
-                    annotation.get("type", "xywh"),
-                )
-            else:
-                new_annotation = COCOAnnotation(
-                    coco_context,
-                    annotation["id"],
-                    annotation["image_id"],
-                    annotation["category_id"],
-                )
-            coco_context.annotations[new_annotation.id] = new_annotation
-            if coco_context.image_annotations.get(new_annotation.image_id) is None:
-                coco_context.image_annotations[new_annotation.image_id] = []
-            coco_context.image_annotations[new_annotation.image_id].append(
-                new_annotation
-            )
-
-        coco_context.base_path = pp.dirname(json_file_path)
-        return COCO(coco_context)
+        return COCO.from_dict(coco_data, json_file_path)
 
     @property
     def images(self):
@@ -407,11 +494,13 @@ class COCO:
 
     def to_dict(self):
         return {
+            **self._custom_attributes,
             "images": [image.to_dict() for image in self.images],
             "annotations": [annotation.to_dict() for annotation in self.annotations],
             "licenses": [license.to_dict() for license in self.licenses],
             "categories": [category.to_dict() for category in self.categories],
             "info": {
+                **self._custom_info,
                 "year": datetime.today().year,
                 "version": "1",
                 "description": "Generated by patmlkit",
@@ -420,6 +509,73 @@ class COCO:
                 "date_created": datetime.today().isoformat(),
             },
         }
+
+    @staticmethod
+    def from_dict(coco_data: Dict[str, Any], base_path: str):
+        assert isinstance(
+            coco_data.get("images"), list
+        ), "COCO file does not have section images"
+        assert isinstance(
+            coco_data.get("categories"), list
+        ), "COCO file does not have section categories"
+        assert isinstance(
+            coco_data.get("annotations"), list
+        ), "COCO file does not have section annotations"
+
+        coco_context = COCOContext()
+
+        coco_context.images = {
+            image["id"]: COCOImage.from_dict(coco_context, image)
+            for image in coco_data.get("images", [])
+        }
+
+        coco_context.licenses = {
+            license["id"]: COCOLicense.from_dict(license)
+            for license in coco_data.get("licenses", [])
+        }
+
+        coco_context.categories = {
+            category["id"]: COCOCategory.from_dict(category)
+            for category in coco_data.get("categories", [])
+        }
+
+        coco_context.annotations = {}
+        coco_context.image_annotations = {}
+
+        for annotation in coco_data.get("annotations", []):
+            if "point" in annotation:
+                new_annotation = COCOPointAnnotation.from_dict(coco_context, annotation)
+            elif "segmentation" in annotation:
+                new_annotation = COCOMaskAnnotation.from_dict(coco_context, annotation)
+            elif "bbox" in annotation:
+                new_annotation = COCOBBoxAnnotation.from_dict(coco_context, annotation)
+            else:
+                new_annotation = COCOAnnotation.from_dict(coco_context, annotation)
+            coco_context.annotations[new_annotation.id] = new_annotation
+            if coco_context.image_annotations.get(new_annotation.image_id) is None:
+                coco_context.image_annotations[new_annotation.image_id] = []
+            coco_context.image_annotations[new_annotation.image_id].append(
+                new_annotation.id
+            )
+
+        coco_context.base_path = pp.dirname(base_path)
+        return COCO(coco_context)
+
+    @property
+    def custom_attributes(self) -> Dict[str, Any]:
+        return self._custom_attributes
+
+    @custom_attributes.setter
+    def custom_attributes(self, custom_attributes: Dict[str, Any]):
+        self._custom_attributes = custom_attributes
+
+    @property
+    def custom_info(self) -> Dict[str, Any]:
+        return self._custom_info
+
+    @custom_info.setter
+    def custom_info(self, info: Dict[str, Any]):
+        self._custom_info = info
 
     def split_into_tiles(
         self,
@@ -522,12 +678,12 @@ class COCO:
 
         def get_annotation_tiles(points: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
             image_tiles = set()
-            for (x, y) in points:
+            for x, y in points:
                 start_row = max(0, math.ceil((x - tile_size) / tile_window_size))
                 end_row = math.ceil(x / tile_window_size)
                 start_column = max(0, math.ceil((y - tile_size) / tile_window_size))
                 end_column = math.ceil(y / tile_window_size)
-                for (row, column) in product(
+                for row, column in product(
                     range(start_row, end_row),
                     range(start_column, end_column),
                 ):
@@ -545,7 +701,7 @@ class COCO:
             self.coco_context.annotations.values(), unit="annotation"
         ):
             if isinstance(annotation, COCOPointAnnotation):
-                for (row, column) in get_annotation_tiles([annotation.point]):
+                for row, column in get_annotation_tiles([annotation.point]):
                     split_annotations_map[
                         f"{annotation.image_id}_{row}_{column}"
                     ].append(
@@ -566,7 +722,7 @@ class COCO:
                     for i in range(len(annotation.segmentation) // 2)
                 ]
 
-                for (row, column) in get_annotation_tiles(point_list):
+                for row, column in get_annotation_tiles(point_list):
                     new_segmentation_points = adjust_points(point_list, row, column)
                     new_segmentation_list = [
                         coord
@@ -606,7 +762,7 @@ class COCO:
                 [x, y, w, h] = annotation.bbox
                 point_list = [(x, y), (x, y + h), (x + w, y + h), (x + w, y)]
 
-                for (row, column) in get_annotation_tiles(point_list):
+                for row, column in get_annotation_tiles(point_list):
                     new_bbox_points = adjust_points(point_list, row, column)
                     new_x = min((point[0] for point in new_bbox_points))
                     new_y = min((point[1] for point in new_bbox_points))
@@ -669,7 +825,7 @@ class COCO:
                     split_annotation.image_id = new_image_id
                     new_coco_context.annotations[split_annotation.id] = split_annotation
                     new_coco_context.image_annotations[new_image_id].append(
-                        split_annotation
+                        split_annotation.id
                     )
 
         new_coco = COCO(new_coco_context)
