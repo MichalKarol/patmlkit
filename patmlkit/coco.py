@@ -607,19 +607,19 @@ class COCO:
         def adjust_points(points: List[Tuple[int, int]], row, column):
             def isPointInside(point):
                 return (
-                    row * tile_window_size
+                    column * tile_window_size
                     <= point[0]
-                    <= row * tile_window_size + tile_size
-                    and column * tile_window_size
-                    <= point[1]
                     <= column * tile_window_size + tile_size
+                    and row * tile_window_size
+                    <= point[1]
+                    <= row * tile_window_size + tile_size
                 )
 
             if all([isPointInside(point) for point in points]):
                 return [
                     (
-                        int(x - row * tile_window_size),
-                        int(y - column * tile_window_size),
+                        int(x - column * tile_window_size),
+                        int(y - row * tile_window_size),
                     )
                     for (x, y) in points
                 ]
@@ -645,13 +645,13 @@ class COCO:
 
             sorted_points = order_points(np.array(list(set(points))))
             clipPolygon = [
-                (row * tile_window_size, column * tile_window_size),
-                (row * tile_window_size + tile_size, column * tile_window_size),
+                (column * tile_window_size, row * tile_window_size),
+                (column * tile_window_size + tile_size, row * tile_window_size),
                 (
-                    row * tile_window_size + tile_size,
                     column * tile_window_size + tile_size,
+                    row * tile_window_size + tile_size,
                 ),
-                (row * tile_window_size, column * tile_window_size + tile_size),
+                (column * tile_window_size, row * tile_window_size + tile_size),
             ]
             SCALING_FACTOR = 10000
 
@@ -672,26 +672,26 @@ class COCO:
             )
 
             return [
-                (int(x - row * tile_window_size), int(y - column * tile_window_size))
+                (int(x - column * tile_window_size), int(y - row * tile_window_size))
                 for (x, y) in order_points(solution[0])
             ]
 
         def get_annotation_tiles(points: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
             image_tiles = set()
             for x, y in points:
-                start_row = max(0, math.ceil((x - tile_size) / tile_window_size))
-                end_row = math.ceil(x / tile_window_size)
-                start_column = max(0, math.ceil((y - tile_size) / tile_window_size))
-                end_column = math.ceil(y / tile_window_size)
+                start_row = max(0, math.ceil((y - tile_size) / tile_window_size))
+                end_row = math.ceil(y / tile_window_size)
+                start_column = max(0, math.ceil((x - tile_size) / tile_window_size))
+                end_column = math.ceil(x / tile_window_size)
                 for row, column in product(
                     range(start_row, end_row),
                     range(start_column, end_column),
                 ):
                     if (
-                        x == row * tile_window_size
-                        or y == column * tile_window_size
-                        or x == row * tile_window_size + tile_size
-                        or y == column * tile_window_size + tile_size
+                        x == column * tile_window_size
+                        or y == row * tile_window_size
+                        or x == column * tile_window_size + tile_size
+                        or y == row * tile_window_size + tile_size
                     ):
                         continue
                     image_tiles.add((row, column))
@@ -711,6 +711,7 @@ class COCO:
                             -1,
                             annotation.category_id,
                             list(adjust_points([annotation.point], row, column)[0]),
+                            annotation.custom_attributes,
                         )
                     )
             elif isinstance(annotation, COCOMaskAnnotation):
@@ -753,9 +754,10 @@ class COCO:
                             -1,
                             annotation.category_id,
                             [new_x, new_y, new_w, new_h],
-                            "xywh",
                             new_segmentation_list,
                             area,
+                            "xywh",
+                            annotation.custom_attributes,
                         )
                     )
             elif isinstance(annotation, COCOBBoxAnnotation):
@@ -784,6 +786,7 @@ class COCO:
                             annotation.category_id,
                             [new_x, new_y, new_w, new_h],
                             "xywh",
+                            annotation.custom_attributes,
                         )
                     )
 
@@ -803,8 +806,8 @@ class COCO:
                 full_tile.fill(255)
 
                 tile = raw_image[
-                    column * tile_window_size : column * tile_window_size + tile_size,
                     row * tile_window_size : row * tile_window_size + tile_size,
+                    column * tile_window_size : column * tile_window_size + tile_size,
                 ]
                 full_tile[: tile.shape[0], : tile.shape[1]] = tile
 
