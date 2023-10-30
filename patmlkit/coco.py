@@ -831,6 +831,7 @@ class COCO:
                     tile_size,
                     tile_file_name,
                     image.license_id,
+                    image.custom_attributes,
                 )
                 new_coco._image_annotations[new_image_id] = []
                 for split_annotation in split_annotations:
@@ -1006,6 +1007,6 @@ class COCO:
             ]
             for fold in range(folds)
         ]
-        coco_iterator = COCOStratifiedIterator(self.coco, split, iterator_folds)
+        coco_iterator = COCOStratifiedIterator(self, split, iterator_folds)
         coco_iterator.to_json(pp.join(self.base_path, "dataset_split.json"))
         return coco_iterator
