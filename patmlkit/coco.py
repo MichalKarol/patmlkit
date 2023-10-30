@@ -15,7 +15,7 @@ from os import makedirs, path as pp
 from patmlkit.image import read_rgb_image, write_rgb_image
 from patmlkit.json import read_json_file, write_json_file
 from tqdm import tqdm, trange
-from typing import Any, Callable, Dict, List, Literal, Set, Union, Tuple
+from typing import Any, Callable, Dict, List, Literal, Set, Union, Tuple, Optional
 
 
 class COCOLicense:
@@ -105,13 +105,13 @@ class COCOCategory:
 class COCOAnnotation:
     def __init__(
         self,
-        ctx: "COCOContext",
+        coco: Optional["COCO"],
         id: int,
         image_id: int,
         category_id: int,
         custom_attributes: Dict[str, Any] | None = None,
     ):
-        self.ctx = ctx
+        self.coco = coco
         self.id = id
         self.image_id = image_id
         self.category_id = category_id
@@ -119,11 +119,15 @@ class COCOAnnotation:
 
     @property
     def image(self):
-        return self.ctx.images[self.image_id]
+        if not self.coco:
+            raise Exception("Missing COCO context")
+        return self.coco._images[self.image_id]
 
     @property
     def category(self):
-        return self.ctx.categories[self.category_id]
+        if not self.coco:
+            raise Exception("Missing coco context")
+        return self.coco._categories[self.category_id]
 
     @property
     def custom_attributes(self) -> Dict[str, Any]:
@@ -143,10 +147,10 @@ class COCOAnnotation:
         }
 
     @staticmethod
-    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+    def from_dict(coco: Optional["COCO"], json_data: Dict[str, Any]):
         required_keys = ["id", "image_id", "category_id"]
         return COCOAnnotation(
-            ctx,
+            coco,
             *[json_data[key] for key in required_keys],
             custom_attributes={
                 key: value
@@ -159,24 +163,24 @@ class COCOAnnotation:
 class COCOPointAnnotation(COCOAnnotation):
     def __init__(
         self,
-        ctx: "COCOContext",
+        coco: Optional["COCO"],
         id: int,
         image_id: int,
         category_id: int,
         point: List[int],
         custom_attributes: Dict[str, Any] | None = None,
     ):
-        COCOAnnotation.__init__(self, ctx, id, image_id, category_id, custom_attributes)
+        COCOAnnotation.__init__(self, coco, id, image_id, category_id, custom_attributes)
         self.point = point
 
     def to_dict(self):
         return {**super().to_dict(), "point": self.point}
 
     @staticmethod
-    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+    def from_dict(coco: Optional["COCO"], json_data: Dict[str, Any]):
         required_keys = ["id", "image_id", "category_id", "point"]
         return COCOPointAnnotation(
-            ctx,
+            coco,
             *[json_data[key] for key in required_keys],
             custom_attributes={
                 key: value
@@ -192,7 +196,7 @@ BBOxType = Union[Literal["xywh"], Literal["xyxy"], Literal["ccwh"]]
 class COCOBBoxAnnotation(COCOAnnotation):
     def __init__(
         self,
-        ctx: "COCOContext",
+        coco: Optional["COCO"],
         id: int,
         image_id: int,
         category_id: int,
@@ -200,7 +204,7 @@ class COCOBBoxAnnotation(COCOAnnotation):
         bbox_type: BBOxType = "xywh",
         custom_attributes: Dict[str, Any] | None = None,
     ):
-        COCOAnnotation.__init__(self, ctx, id, image_id, category_id, custom_attributes)
+        COCOAnnotation.__init__(self, coco, id, image_id, category_id, custom_attributes)
         assert len(bbox) == 4, "Bounding box does not have 4 elements"
         self.bbox = bbox
         if bbox_type == "xyxy":
@@ -214,6 +218,11 @@ class COCOBBoxAnnotation(COCOAnnotation):
                 center_x - width // 2 + width,
                 center_y - height // 2 + height,
             ]
+        if coco:
+            image = coco._images[image_id]
+            [x, y, w, h] = self.bbox
+            assert x + w < image.width, "Bounding box outside image width"
+            assert y + h < image.height, "Bounding box outside image height"
 
     def to_dict(self):
         [width, height] = self.bbox[2:4]
@@ -225,11 +234,11 @@ class COCOBBoxAnnotation(COCOAnnotation):
         }
 
     @staticmethod
-    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+    def from_dict(coco: Optional["COCO"], json_data: Dict[str, Any]):
         required_keys = ["id", "image_id", "category_id", "bbox"]
         optional_keys = ["type"]
         return COCOBBoxAnnotation(
-            ctx,
+            coco,
             *[json_data[key] for key in required_keys],
             *[json_data.get(key) for key in optional_keys],
             custom_attributes={
@@ -243,7 +252,7 @@ class COCOBBoxAnnotation(COCOAnnotation):
 class COCOMaskAnnotation(COCOBBoxAnnotation):
     def __init__(
         self,
-        ctx: "COCOContext",
+        coco: Optional["COCO"],
         id: int,
         image_id: int,
         category_id: int,
@@ -254,12 +263,18 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
         custom_attributes: Dict[str, Any] | None = None,
     ):
         COCOBBoxAnnotation.__init__(
-            self, ctx, id, image_id, category_id, bbox, bbox_type, custom_attributes
+            self, coco, id, image_id, category_id, bbox, bbox_type, custom_attributes
         )
         assert len(segmentation) % 2 == 0, "Segmentation has odd number of elements"
         assert area > 0, "Area is below zero"
+        assert all([coordinate >= 0 for coordinate in segmentation]), "Segmentation coordinate below 0"
         self.segmentation = segmentation
         self.area = area
+
+        if coco:
+            image = coco._images[image_id]
+            assert all([segmentation[i] < image.width for i in range(0, len(segmentation), 2)]), "Segmentation outside image width"
+            assert all([segmentation[i] < image.height for i in range(1, len(segmentation), 2)]), "Segmentation outside image height"
 
     def to_dict(self):
         return {
@@ -269,7 +284,7 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
         }
 
     @staticmethod
-    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+    def from_dict(coco: Optional["COCO"], json_data: Dict[str, Any]):
         required_keys = [
             "id",
             "image_id",
@@ -280,7 +295,7 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
         ]
         optional_keys = ["type"]
         return COCOMaskAnnotation(
-            ctx,
+            coco,
             *[json_data[key] for key in required_keys],
             *[json_data.get(key) for key in optional_keys],
             custom_attributes={
@@ -294,7 +309,7 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
 class COCOImage:
     def __init__(
         self,
-        ctx: "COCOContext",
+        coco: Optional["COCO"],
         id: int,
         width: int,
         height: int,
@@ -302,7 +317,7 @@ class COCOImage:
         license_id: int | None = None,
         custom_attributes: Dict[str, Any] | None = None,
     ):
-        self.ctx = ctx
+        self.coco = coco
         self.id = id
         self.width = width
         self.height = height
@@ -314,16 +329,20 @@ class COCOImage:
 
     @property
     def annotations(self):
+        if not self.coco:
+            raise Exception("Missing COCO context")
         return [
-            self.ctx.annotations[ann_id]
-            for ann_id in self.ctx.image_annotations.get(self.id, list())
+            self.coco._annotations[ann_id]
+            for ann_id in self.coco._image_annotations.get(self.id, list())
         ]
 
     @property
     def license(self):
+        if not self.coco:
+            raise Exception("Missing COCO context")
         if not self.license_id:
             return None
-        return self.ctx.licenses.get(self.license_id, None)
+        return self.coco._licenses.get(self.license_id, None)
 
     @property
     def custom_attributes(self) -> Dict[str, Any]:
@@ -347,11 +366,11 @@ class COCOImage:
         }
 
     @staticmethod
-    def from_dict(ctx: "COCOContext", json_data: Dict[str, Any]):
+    def from_dict(coco: Optional["COCO"], json_data: Dict[str, Any]):
         required_keys = ["id", "width", "height", "file_name"]
         optional_keys = ["license"]
         return COCOImage(
-            ctx,
+            coco,
             *[json_data[key] for key in required_keys],
             *[json_data.get(key) for key in optional_keys],
             custom_attributes={
@@ -362,23 +381,15 @@ class COCOImage:
         )
 
 
-class COCOContext:
-    base_path: str
-    licenses: Dict[int, COCOLicense]
-    images: Dict[int, COCOImage]
-    annotations: Dict[int, COCOAnnotation]
-    categories: Dict[int, COCOCategory]
-    image_annotations: Dict[int, List[int]]
-
 
 class COCOStratifiedIterator:
     def __init__(
         self,
-        coco_context: COCOContext,
+        coco: "COCO",
         split: Tuple[float, float],
         folds: List[List[int]],
     ):
-        self.coco_context = coco_context
+        self.coco = coco
         self.split = split
         self.folds = folds
         fold_part_size = 100 / len(folds)
@@ -403,7 +414,7 @@ class COCOStratifiedIterator:
 
     @staticmethod
     def from_json(
-        coco_context: COCOContext, json_file_path: str
+        coco: "COCO", json_file_path: str
     ) -> "COCOStratifiedIterator":
         iterator_data = read_json_file(json_file_path)
         assert iterator_data[
@@ -413,35 +424,35 @@ class COCOStratifiedIterator:
             "folds"
         ], "COCO Stratified Iterator file does not have folds"
         return COCOStratifiedIterator(
-            coco_context, iterator_data["split"], iterator_data["folds"]
+            coco, iterator_data["split"], iterator_data["folds"]
         )
 
     def __create_coco_out_of_folds__(self, folds: List[int]) -> "COCO":
-        new_coco_context = COCOContext()
-        new_coco_context.licenses = self.coco_context.licenses
-        new_coco_context.categories = self.coco_context.categories
-        new_coco_context.images = {
+        new_coco = COCO()
+        new_coco._licenses = self.coco._licenses
+        new_coco._categories = self.coco._categories
+        new_coco._images = {
             key: value
-            for key, value in self.coco_context.images.items()
+            for key, value in self.coco._images.items()
             if key in folds
         }
-        new_coco_context.image_annotations = {
+        new_coco._image_annotations = {
             image.id: [ann.id for ann in image.annotations]
-            for image in new_coco_context.images.values()
+            for image in new_coco._images.values()
         }
 
-        new_coco_context.annotations = {
-            annotation_id: self.coco_context.annotations[annotation_id]
-            for annotation_ids in new_coco_context.image_annotations.values()
+        new_coco._annotations = {
+            annotation_id: self.coco._annotations[annotation_id]
+            for annotation_ids in new_coco._image_annotations.values()
             for annotation_id in annotation_ids
         }
-        new_coco_context.base_path = self.coco_context.base_path
-        return COCO(new_coco_context)
+        new_coco.base_path = self.coco.base_path
+        return new_coco
 
     def __iter__(self):
         return self
 
-    def __next__(self) -> Tuple["COCO", "COCO", "COCO"]:
+    def __next__(self) -> Tuple[Optional["COCO"], Optional["COCO"], Optional["COCO"]]:
         next_permutation = next(self.permutations)
         train_coco = self.__create_coco_out_of_folds__(
             [
@@ -463,8 +474,14 @@ class COCOStratifiedIterator:
 
 
 class COCO:
-    def __init__(self, coco_context: COCOContext):
-        self.coco_context = coco_context
+    base_path: str
+    _licenses: Dict[int, COCOLicense] = {}
+    _images: Dict[int, COCOImage] = {}
+    _annotations: Dict[int, COCOAnnotation] = {}
+    _categories: Dict[int, COCOCategory] = {}
+    _image_annotations: Dict[int, List[int]] = {}
+
+    def __init__(self):
         self._custom_attributes = dict()
         self._custom_info = dict()
 
@@ -478,19 +495,19 @@ class COCO:
 
     @property
     def images(self):
-        return list(self.coco_context.images.values())
+        return list(self._images.values())
 
     @property
     def annotations(self):
-        return list(self.coco_context.annotations.values())
+        return list(self._annotations.values())
 
     @property
     def categories(self):
-        return list(self.coco_context.categories.values())
+        return list(self._categories.values())
 
     @property
     def licenses(self):
-        return list(self.coco_context.licenses.values())
+        return list(self._licenses.values())
 
     def to_dict(self):
         return {
@@ -522,44 +539,44 @@ class COCO:
             coco_data.get("annotations"), list
         ), "COCO file does not have section annotations"
 
-        coco_context = COCOContext()
+        coco = COCO()
 
-        coco_context.images = {
-            image["id"]: COCOImage.from_dict(coco_context, image)
+        coco._images = {
+            image["id"]: COCOImage.from_dict(coco, image)
             for image in coco_data.get("images", [])
         }
 
-        coco_context.licenses = {
+        coco._licenses = {
             license["id"]: COCOLicense.from_dict(license)
             for license in coco_data.get("licenses", [])
         }
 
-        coco_context.categories = {
+        coco._categories = {
             category["id"]: COCOCategory.from_dict(category)
             for category in coco_data.get("categories", [])
         }
 
-        coco_context.annotations = {}
-        coco_context.image_annotations = {}
+        coco._annotations = {}
+        coco._image_annotations = {}
 
         for annotation in coco_data.get("annotations", []):
             if "point" in annotation:
-                new_annotation = COCOPointAnnotation.from_dict(coco_context, annotation)
+                new_annotation = COCOPointAnnotation.from_dict(coco, annotation)
             elif "segmentation" in annotation:
-                new_annotation = COCOMaskAnnotation.from_dict(coco_context, annotation)
+                new_annotation = COCOMaskAnnotation.from_dict(coco, annotation)
             elif "bbox" in annotation:
-                new_annotation = COCOBBoxAnnotation.from_dict(coco_context, annotation)
+                new_annotation = COCOBBoxAnnotation.from_dict(coco, annotation)
             else:
-                new_annotation = COCOAnnotation.from_dict(coco_context, annotation)
-            coco_context.annotations[new_annotation.id] = new_annotation
-            if coco_context.image_annotations.get(new_annotation.image_id) is None:
-                coco_context.image_annotations[new_annotation.image_id] = []
-            coco_context.image_annotations[new_annotation.image_id].append(
+                new_annotation = COCOAnnotation.from_dict(coco, annotation)
+            coco._annotations[new_annotation.id] = new_annotation
+            if coco._image_annotations.get(new_annotation.image_id) is None:
+                coco._image_annotations[new_annotation.image_id] = []
+            coco._image_annotations[new_annotation.image_id].append(
                 new_annotation.id
             )
 
-        coco_context.base_path = pp.dirname(base_path)
-        return COCO(coco_context)
+        coco.base_path = pp.dirname(base_path)
+        return coco
 
     @property
     def custom_attributes(self) -> Dict[str, Any]:
@@ -584,19 +601,21 @@ class COCO:
         tiled_dataset_directory: str,
         skip_empty: bool = True,
         skip_below_area: int = 20,
-    ) -> "COCO":
+    ) -> Optional["COCO"]:
         assert tile_size > 0, "Tile size must be positive"
         assert overlap >= 0, "Overlap must be positive or zero"
         assert overlap < 1, "Overlap must be less than one"
 
         makedirs(tiled_dataset_directory, exist_ok=True)
-        new_coco_context = COCOContext()
-        new_coco_context.licenses = self.coco_context.licenses
-        new_coco_context.categories = self.coco_context.categories
-        new_coco_context.base_path = tiled_dataset_directory
-        new_coco_context.images = {}
-        new_coco_context.annotations = {}
-        new_coco_context.image_annotations = {}
+        new_coco = COCO()
+        new_coco._licenses = self._licenses
+        new_coco._categories = self._categories
+        new_coco.base_path = tiled_dataset_directory
+        new_coco._images = {
+            -1: COCOImage(new_coco, -1, tile_size, tile_size, "none", None, None)
+        }
+        new_coco._annotations = {}
+        new_coco._image_annotations = {}
 
         tile_window_size = int(tile_size * (1 - overlap))
 
@@ -605,24 +624,19 @@ class COCO:
         split_annotations_map = defaultdict(list)
 
         def adjust_points(points: List[Tuple[int, int]], row, column):
-            def isPointInside(point):
-                return (
-                    column * tile_window_size
-                    <= point[0]
-                    <= column * tile_window_size + tile_size
-                    and row * tile_window_size
-                    <= point[1]
-                    <= row * tile_window_size + tile_size
+            converted_points = [
+                (
+                    int(x - column * tile_window_size),
+                    int(y - row * tile_window_size),
                 )
+                for (x, y) in points
+            ]
 
-            if all([isPointInside(point) for point in points]):
-                return [
-                    (
-                        int(x - column * tile_window_size),
-                        int(y - row * tile_window_size),
-                    )
-                    for (x, y) in points
-                ]
+            def isPointInside(point):
+                return 0 <= point[0]< tile_size and 0 <= point[1] <  tile_size
+
+            if all([isPointInside(point) for point in converted_points]):
+                return converted_points
 
             def order_points(pts):
                 center = tuple(
@@ -643,15 +657,12 @@ class COCO:
                     % 360,
                 )
 
-            sorted_points = order_points(np.array(list(set(points))))
+            sorted_points = order_points(np.array(list(set(converted_points))))
             clipPolygon = [
-                (column * tile_window_size, row * tile_window_size),
-                (column * tile_window_size + tile_size, row * tile_window_size),
-                (
-                    column * tile_window_size + tile_size,
-                    row * tile_window_size + tile_size,
-                ),
-                (column * tile_window_size, row * tile_window_size + tile_size),
+                (0, 0),
+                (tile_size - 1, 0),
+                (tile_size - 1, tile_size - 1),
+                (0, tile_size - 1),
             ]
             SCALING_FACTOR = 10000
 
@@ -671,34 +682,30 @@ class COCO:
                 pc.Execute(pyclipper.CT_INTERSECTION), SCALING_FACTOR
             )
 
-            return [
-                (int(x - column * tile_window_size), int(y - row * tile_window_size))
-                for (x, y) in order_points(solution[0])
-            ]
+            return [(int(x), int(y)) for (x, y) in order_points(solution[0])]
 
         def get_annotation_tiles(points: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
             image_tiles = set()
             for x, y in points:
-                start_row = max(0, math.ceil((y - tile_size) / tile_window_size))
+                start_row = max(0, math.ceil((y - tile_size + 1) / tile_window_size))
                 end_row = math.ceil(y / tile_window_size)
-                start_column = max(0, math.ceil((x - tile_size) / tile_window_size))
+                start_column = max(0, math.ceil((x - tile_size + 1) / tile_window_size))
                 end_column = math.ceil(x / tile_window_size)
                 for row, column in product(
                     range(start_row, end_row),
                     range(start_column, end_column),
                 ):
-                    if (
-                        x == column * tile_window_size
-                        or y == row * tile_window_size
-                        or x == column * tile_window_size + tile_size
-                        or y == row * tile_window_size + tile_size
-                    ):
+                    tx = x - column * tile_window_size
+                    ty = y - row * tile_window_size
+
+                    if (tx == tile_size - 1 or ty == tile_size - 1):
                         continue
+
                     image_tiles.add((row, column))
             return image_tiles
 
         for annotation in tqdm(
-            self.coco_context.annotations.values(), unit="annotation"
+            self._annotations.values(), unit="annotation"
         ):
             if isinstance(annotation, COCOPointAnnotation):
                 for row, column in get_annotation_tiles([annotation.point]):
@@ -706,7 +713,7 @@ class COCO:
                         f"{annotation.image_id}_{row}_{column}"
                     ].append(
                         COCOPointAnnotation(
-                            new_coco_context,
+                            new_coco,
                             next(annotation_id_generator),
                             -1,
                             annotation.category_id,
@@ -749,7 +756,7 @@ class COCO:
                         f"{annotation.image_id}_{row}_{column}"
                     ].append(
                         COCOMaskAnnotation(
-                            new_coco_context,
+                            new_coco,
                             next(annotation_id_generator),
                             -1,
                             annotation.category_id,
@@ -780,7 +787,7 @@ class COCO:
                         f"{annotation.image_id}_{row}_{column}"
                     ].append(
                         COCOBBoxAnnotation(
-                            new_coco_context,
+                            new_coco,
                             next(annotation_id_generator),
                             -1,
                             annotation.category_id,
@@ -790,11 +797,12 @@ class COCO:
                         )
                     )
 
-        for image in tqdm(self.coco_context.images.values(), unit="image"):
+        new_coco._images = {}
+        for image in tqdm(self._images.values(), unit="image"):
             rows = range(0, math.ceil(image.height / tile_window_size))
             columns = range(0, math.ceil(image.width / tile_window_size))
             [base, extension] = pp.splitext(image.file_name)
-            read_path = pp.join(self.coco_context.base_path, image.file_name)
+            read_path = pp.join(self.base_path, image.file_name)
             raw_image = read_rgb_image(read_path)
 
             for row, column in product(rows, columns):
@@ -815,23 +823,22 @@ class COCO:
                 tile_full_path = pp.join(tiled_dataset_directory, tile_file_name)
                 write_rgb_image(tile_full_path, full_tile)
                 new_image_id = next(image_id_generator)
-                new_coco_context.images[new_image_id] = COCOImage(
-                    new_coco_context,
+                new_coco._images[new_image_id] = COCOImage(
+                    new_coco,
                     new_image_id,
                     tile_size,
                     tile_size,
                     tile_file_name,
                     image.license_id,
                 )
-                new_coco_context.image_annotations[new_image_id] = []
+                new_coco._image_annotations[new_image_id] = []
                 for split_annotation in split_annotations:
                     split_annotation.image_id = new_image_id
-                    new_coco_context.annotations[split_annotation.id] = split_annotation
-                    new_coco_context.image_annotations[new_image_id].append(
+                    new_coco._annotations[split_annotation.id] = split_annotation
+                    new_coco._image_annotations[new_image_id].append(
                         split_annotation.id
                     )
 
-        new_coco = COCO(new_coco_context)
         new_coco.to_json(pp.join(tiled_dataset_directory, "dataset.json"))
         return new_coco
 
@@ -886,11 +893,11 @@ class COCO:
 
         rng = np.random.default_rng()
 
-        length_of_chromosome = len(self.images)
-        ann_categories = np.array([ann.category_id for ann in self.annotations])
+        length_of_chromosome = len(self._images)
+        ann_categories = np.array([ann.category_id for ann in self._annotations])
         target_categories_count = {
             category.id: np.sum(ann_categories == category.id) // folds
-            for category in self.categories
+            for category in self._categories
         }
 
         number_of_parents = 2
@@ -899,7 +906,7 @@ class COCO:
             rng.random((population, length_of_chromosome)) * folds
         ).astype(np.int32)
         fitness_function_simple = lambda chromosome: fitness_function(
-            chromosome, self.images, target_categories_count, folds
+            chromosome, self._images, target_categories_count, folds
         )
         top_population_left = population * top_population_left_percent // 100
         tournament_size = population * tournament_size_percent // 100
@@ -992,14 +999,14 @@ class COCO:
 
         iterator_folds = [
             [
-                self.images[image_idx].id
+                self._images[image_idx].id
                 for image_idx, gene in enumerate(best_chromosome)
                 if gene == fold
             ]
             for fold in range(folds)
         ]
-        coco_iterator = COCOStratifiedIterator(self.coco_context, split, iterator_folds)
+        coco_iterator = COCOStratifiedIterator(self.coco, split, iterator_folds)
         coco_iterator.to_json(
-            pp.join(self.coco_context.base_path, "dataset_split.json")
+            pp.join(self.base_path, "dataset_split.json")
         )
         return coco_iterator
