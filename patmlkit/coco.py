@@ -170,7 +170,9 @@ class COCOPointAnnotation(COCOAnnotation):
         point: List[int],
         custom_attributes: Dict[str, Any] | None = None,
     ):
-        COCOAnnotation.__init__(self, coco, id, image_id, category_id, custom_attributes)
+        COCOAnnotation.__init__(
+            self, coco, id, image_id, category_id, custom_attributes
+        )
         self.point = point
 
     def to_dict(self):
@@ -204,7 +206,9 @@ class COCOBBoxAnnotation(COCOAnnotation):
         bbox_type: BBOxType = "xywh",
         custom_attributes: Dict[str, Any] | None = None,
     ):
-        COCOAnnotation.__init__(self, coco, id, image_id, category_id, custom_attributes)
+        COCOAnnotation.__init__(
+            self, coco, id, image_id, category_id, custom_attributes
+        )
         assert len(bbox) == 4, "Bounding box does not have 4 elements"
         self.bbox = bbox
         if bbox_type == "xyxy":
@@ -267,14 +271,20 @@ class COCOMaskAnnotation(COCOBBoxAnnotation):
         )
         assert len(segmentation) % 2 == 0, "Segmentation has odd number of elements"
         assert area > 0, "Area is below zero"
-        assert all([coordinate >= 0 for coordinate in segmentation]), "Segmentation coordinate below 0"
+        assert all(
+            [coordinate >= 0 for coordinate in segmentation]
+        ), "Segmentation coordinate below 0"
         self.segmentation = segmentation
         self.area = area
 
         if coco:
             image = coco._images[image_id]
-            assert all([segmentation[i] < image.width for i in range(0, len(segmentation), 2)]), "Segmentation outside image width"
-            assert all([segmentation[i] < image.height for i in range(1, len(segmentation), 2)]), "Segmentation outside image height"
+            assert all(
+                [segmentation[i] < image.width for i in range(0, len(segmentation), 2)]
+            ), "Segmentation outside image width"
+            assert all(
+                [segmentation[i] < image.height for i in range(1, len(segmentation), 2)]
+            ), "Segmentation outside image height"
 
     def to_dict(self):
         return {
@@ -381,7 +391,6 @@ class COCOImage:
         )
 
 
-
 class COCOStratifiedIterator:
     def __init__(
         self,
@@ -413,9 +422,7 @@ class COCOStratifiedIterator:
         )
 
     @staticmethod
-    def from_json(
-        coco: "COCO", json_file_path: str
-    ) -> "COCOStratifiedIterator":
+    def from_json(coco: "COCO", json_file_path: str) -> "COCOStratifiedIterator":
         iterator_data = read_json_file(json_file_path)
         assert iterator_data[
             "split"
@@ -432,9 +439,7 @@ class COCOStratifiedIterator:
         new_coco._licenses = self.coco._licenses
         new_coco._categories = self.coco._categories
         new_coco._images = {
-            key: value
-            for key, value in self.coco._images.items()
-            if key in folds
+            key: value for key, value in self.coco._images.items() if key in folds
         }
         new_coco._image_annotations = {
             image.id: [ann.id for ann in image.annotations]
@@ -571,9 +576,7 @@ class COCO:
             coco._annotations[new_annotation.id] = new_annotation
             if coco._image_annotations.get(new_annotation.image_id) is None:
                 coco._image_annotations[new_annotation.image_id] = []
-            coco._image_annotations[new_annotation.image_id].append(
-                new_annotation.id
-            )
+            coco._image_annotations[new_annotation.image_id].append(new_annotation.id)
 
         coco.base_path = pp.dirname(base_path)
         return coco
@@ -633,7 +636,7 @@ class COCO:
             ]
 
             def isPointInside(point):
-                return 0 <= point[0]< tile_size and 0 <= point[1] <  tile_size
+                return 0 <= point[0] < tile_size and 0 <= point[1] < tile_size
 
             if all([isPointInside(point) for point in converted_points]):
                 return converted_points
@@ -698,15 +701,13 @@ class COCO:
                     tx = x - column * tile_window_size
                     ty = y - row * tile_window_size
 
-                    if (tx == tile_size - 1 or ty == tile_size - 1):
+                    if tx == tile_size - 1 or ty == tile_size - 1:
                         continue
 
                     image_tiles.add((row, column))
             return image_tiles
 
-        for annotation in tqdm(
-            self._annotations.values(), unit="annotation"
-        ):
+        for annotation in tqdm(self._annotations.values(), unit="annotation"):
             if isinstance(annotation, COCOPointAnnotation):
                 for row, column in get_annotation_tiles([annotation.point]):
                     split_annotations_map[
@@ -1006,7 +1007,5 @@ class COCO:
             for fold in range(folds)
         ]
         coco_iterator = COCOStratifiedIterator(self.coco, split, iterator_folds)
-        coco_iterator.to_json(
-            pp.join(self.base_path, "dataset_split.json")
-        )
+        coco_iterator.to_json(pp.join(self.base_path, "dataset_split.json"))
         return coco_iterator
